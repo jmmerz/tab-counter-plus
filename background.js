@@ -1,5 +1,6 @@
 /*
  * Copyright 2018 Oriol Brufau
+ * Additions 2018 by Jonathon Merz
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,17 +15,6 @@
  * limitations under the License.
  */
 
-let prefs = {
-  bgColor: "#ffffff",
-  bgColorEnabled: false,
-  color: "#000000",
-  colorEnabled: true,
-  titleTabsPrefix: "Open tabs: ",
-  titleCurrentTabPrefix: "Current tab: ",
-  titleHiddenTabsPrefix: "Hidden tabs: ",
-  maxFontSize: 18,
-  fontWeight: 100
-};
 
 // Tab count UPDATE operations: These can be combined
 let UPDATE_ACTION_UPDATE_INDEX = 1;                                                                             // 0001
@@ -39,6 +29,25 @@ let TAB_ACTION_MOVED = 2;
 let TAB_ACTION_CREATED = 3;
 let TAB_ACTION_REMOVED = 4;
 
+let HIDDEN_TABS_DO_NOT_SHOW = "doNotShow";
+let HIDDEN_TABS_SHOW_WHEN_PRESENT = "showWhenPresent";
+let HIDDEN_TABS_SHOW_WHEN_ZERO = "showWhenZero";
+
+let prefs = {
+  actionIconHeightPx: 28,
+  actionIconWidthPx: 84,
+  bgColor: "#ffffff",
+  bgColorEnabled: false,
+  textColor: "#000000",
+  textColorEnabled: true,
+  hiddenTabsOption: HIDDEN_TABS_SHOW_WHEN_PRESENT,
+  titleCurrentTabPrefix:  "Current tab: ",
+  titleVisibleTabsPrefix: "Open tabs:   ",
+  titleHiddenTabsPrefix:  "Hidden tabs: ",
+  maxFontSize: 18,
+  fontWeight: 100
+};
+
 function UpdateInfo(updateAction, tabAction, tabId) {
   this.updateAction = updateAction;
   this.tabAction = tabAction;
@@ -51,8 +60,26 @@ let visibleTabCounts = new Map();
 let hiddenTabCounts = new Map();
 let tabIndexes = new Map();
 let lastTime = new Map();
-let allWindows = undefined;
 let removedTabIds = new Set();
+/**
+ * This is unfortunately necessary to handle tracking hidden/un-hidden tabs
+ * since there is no tabs.onHidden/onUnhidden event.
+ */
+let windowRecountIntervals = new Map();
+
+function clearWindowRecountInterval(windowId) {
+    clearInterval(windowId);
+    windowRecountIntervals.delete(windowId);
+}
+
+function setWindowRecountInterval(windowId) {
+    windowRecountIntervals.set(windowId, 
+        setInterval(() => {
+            updateTabCountsAndIndexForWindow(windowId);
+        }, 500)
+    );
+}
+
 
 function updateIcon(windowId, tabNum = -1, tabCount = -1, hiddenTabCount = -1) {
   // Debounce if there are multiple calls in a short amount of time.
@@ -77,9 +104,10 @@ function updateIcon(windowId, tabNum = -1, tabCount = -1, hiddenTabCount = -1) {
   }
 
   // Show the counter
-  let text = tabNum + "/" + tabCount + " (" + hiddenTabCount + ")";
+  let showHiddenTabs = prefs.hiddenTabsOption == HIDDEN_TABS_SHOW_WHEN_ZERO || (prefs.hiddenTabsOption == HIDDEN_TABS_SHOW_WHEN_PRESENT && hiddenTabCount > 0);
+  let text = tabNum + "/" + tabCount + (showHiddenTabs ? (" (" + hiddenTabCount + ")") : "");
   let title = prefs.titleCurrentTabPrefix + tabNum;
-  title += "\n" + prefs.titleTabsPrefix + tabCount;
+  title += "\n" + prefs.titleVisibleTabsPrefix + tabCount;
   title += "\n" + prefs.titleHiddenTabsPrefix + hiddenTabCount;
 
   browser.browserAction.setTitle({ title, windowId });
@@ -92,7 +120,7 @@ function updateIcon(windowId, tabNum = -1, tabCount = -1, hiddenTabCount = -1) {
   if(fontSize > prefs.maxFontSize) fontSize = prefs.maxFontSize;
   // for text-anchor below: Can use 'start' and replace x="50%" below with x="0%"...
   let path = "data:image/svg+xml," + encodeURIComponent(`<?xml version="1.0" encoding="utf-8"?>
-  <svg version="1.1" xmlns="http://www.w3.org/2000/svg" width="84" height="28">
+  <svg version="1.1" xmlns="http://www.w3.org/2000/svg" width="${prefs.actionIconWidthPx}" height="${prefs.actionIconHeightPx}">
     <style type="text/css"><![CDATA[
     text {
       dominant-baseline: central;
@@ -100,7 +128,7 @@ function updateIcon(windowId, tabNum = -1, tabCount = -1, hiddenTabCount = -1) {
       font-size: ${fontSize}px;
       font-weight: ${prefs.fontWeight};
       text-anchor: middle;
-      fill: ${parseColor(prefs.color, prefs.colorEnabled)};
+      fill: ${parseColor(prefs.textColor, prefs.textColorEnabled)};
     }
     svg {
       background-color: ${parseColor(prefs.bgColor, prefs.bgColorEnabled)};
@@ -123,10 +151,6 @@ function updateTabIndexAndCount(windowId, zeroBasedTabIndex, tabCount, hiddenTab
   updateIcon(windowId, tabIndex, tabCount, hiddenTabCount);
 };
 
-/**
- * tabCountAdjust is used to force an adjustment of the tabCount in situations where (for instance)
- * a tab has been removed, but it is still present in the tabsList gotten by getAllTabsInWindow.
- */
 function updateTabCountsAndIndexForWindow(windowId, updateInfo) {
   let getAllTabsInWindow = browser.tabs.query({windowId: windowId});
   getAllTabsInWindow.then((tabs) => {
@@ -203,10 +227,12 @@ function updateTabCountsAndIndexForTabsInWindow(windowId, tabs, updateInfo = DEF
   browser.windows.onCreated.addListener(function ({id}) {
     //console.log("windows.onCreated: windowId: " + id);
     updateTabCountsAndIndexForWindow(id);
+    setWindowRecountInterval(id);
   });
 
   browser.windows.onRemoved.addListener(function (windowId) {
     //console.log("windows.onRemoved: windowId: " + windowId);
+    clearWindowRecountInterval(windowId);
     visibleTabCounts.delete(windowId);
     hiddenTabCounts.delete(windowId);
     tabIndexes.delete(windowId);
@@ -256,6 +282,7 @@ function updateTabCountsAndIndexForTabsInWindow(windowId, tabs, updateInfo = DEF
   let windows = await browser.windows.getAll({populate: true});
   for (let {id, tabs} of windows) {
     updateTabCountsAndIndexForTabsInWindow(id, tabs);
+    setWindowRecountInterval(id);
   }
 
 })();
